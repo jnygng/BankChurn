@@ -1,0 +1,245 @@
+---
+title: "Bank Churn Data Analysis"
+author: "Jenny Gong"
+date: "2/25/2025"
+output: pdf_document
+---
+
+```{r}
+packs = c('dplyr','ggplot2', 'caret','corrplot', 'e1071','readr', 'pROC')
+lapply(packs,require,character.only=TRUE)
+
+data = read.csv('C:/Users/jenny/OneDrive/Documents/MSDS/SPRING 2023/STAT 656/BankChurners.csv')
+data = data[,-23:-22]
+```
+
+## Check for missing values
+
+```{r }
+anyNA(data)
+sum(anyNA(data))
+```
+
+There are no missing values in our data.
+
+
+```{r }
+#Y = data$Attrition_Flag
+Y = select(data, Attrition_Flag) #%>% unlist()
+X = select(data,-Attrition_Flag)
+Y = ifelse(Y == 'Existing Customer', 0, 1) # 1 = attrited customer
+```
+
+```{r}
+set.seed(1)
+trainSplit = createDataPartition(y = Y, p = 0.8, list = FALSE)
+
+Ytrain = Y[trainSplit]
+Xtrain = X[trainSplit,]
+XtrainMat = as.matrix(Xtrain)
+Ytest  = Y[-trainSplit]
+Xtest  = X[-trainSplit,]
+XtestMat = as.matrix(Xtest)
+```
+
+
+```{r}
+trControl = trainControl(method='none')
+```
+
+
+## Checking data structures
+
+```{r}
+XtrainFactors = select(Xtrain, Gender, Education_Level,
+                       Marital_Status, Income_Category,
+                       Card_Category) %>%
+                mutate_all(factor)
+
+XtestFactors = select(Xtest, Gender, Education_Level,
+                       Marital_Status, Income_Category,
+                       Card_Category) %>%
+                mutate_all(factor)
+
+Ytrain = factor(Ytrain)
+Ytest  = factor(Ytest)
+
+```
+
+
+```{r}
+dummyModel = dummyVars(~ ., data = XtrainFactors, fullRank = TRUE)
+XtrainQualDummy = predict(dummyModel, XtrainFactors)
+XtestQualDummy  = predict(dummyModel, XtestFactors)
+```
+
+create the full feature matrices for the training and test set
+```{r}
+XtrainQuan = select(Xtrain, -Gender, -Education_Level,
+                    -Marital_Status, -Income_Category,
+                    -Card_Category)
+XtrainFull = cbind(XtrainQualDummy, XtrainQuan)
+
+XtestQuan  = select(Xtest, -Gender, -Education_Level,
+                    -Marital_Status, -Income_Category,
+                    -Card_Category)
+XtestFull  = cbind(XtestQualDummy, XtestQuan)
+```
+
+```{r}
+require(corrplot)
+corrplot(cor(XtrainFull), tl.cex = 0.4) 
+
+```
+
+
+## Checking Multicollinearity - check preprocessing2 notes 
+```{r}
+corr = cor(XtrainFull)
+(highCorr = findCorrelation(corr, 0.85, verbose=TRUE, names = TRUE))
+
+```
+
+We will drop the feature average open to buy rate (the difference between credit limit assigned to cardholder account and the present balance on the account) because it has high correlation of 0.996 with credit limit.
+
+```{r}
+XtrainFull = XtrainFull[-28] # drop avg_open_to_buy
+#XtrainFull = XtrainFull[-30]
+```
+
+
+
+## Logistic Regression
+
+```{r}
+#YtrainRelevel = relevel(Ytrain, ref = 1)
+#YtestRelevel  = relevel(Ytest, ref = 1)
+
+trControl    = trainControl(method = 'none')
+outLogistic  = train(x = XtrainFull, y = Ytrain, 
+                   method = 'glm', trControl = trControl)
+
+```
+The warning (glm.fit: algorithm did not converge) means that it's perfectly linearly separable. **Update: this warning went away after dropping the Naive Bayes columns
+
+```{r}
+YhatTestProb = predict(outLogistic, XtestFull, type = 'prob')
+head(YhatTestProb)
+```
+
+```{r}
+calibProbs = calibration(Ytest ~ YhatTestProb$'1', cuts = 5)
+xyplot(calibProbs)
+```
+
+The probabilities do not appear to be well calibrated, not following the diagonal line.
+
+
+```{r}
+YhatTest = predict(outLogistic, XtestFull, type = 'raw')
+```
+
+```{r}
+confusionMatrixOut = confusionMatrix(reference = Ytest, data = YhatTest)
+
+print(confusionMatrixOut$table)
+
+print(confusionMatrixOut$overall[1:2])
+
+print(confusionMatrixOut$byClass[1:2])
+
+logistic_accuracy = confusionMatrixOut$overall[1]
+logistic_accuracy
+```
+
+Our logistic regression model provides 89.83% accuracy. 
+
+```{r}
+require(pROC)
+rocCurve = roc(Ytest, YhatTestProb$'1')
+plot(rocCurve, legacy.axes=TRUE)
+```
+
+```{r}
+logistic_AUC = rocCurve$auc
+logistic_AUC
+```
+## Determining significant features using GLM 
+```{r}
+# glmOut = glm(Ytrain ~ XtrainFull$Gender.M +
+#                XtrainFull$Education_Level.Doctorate + 
+#                XtrainFull$Education_Level.Graduate +
+#                XtrainFull$`Education_Level.High School`+
+#                XtrainFull$`Education_Level.Post-Graduate` + 
+#                XtrainFull$Education_Level.Uneducated + 
+#                XtrainFull$Education_Level.Unknown + 
+#                XtrainFull$Marital_Status.Married + 
+#                XtrainFull$Marital_Status.Unknown, family = 'binomial')
+glmOut = glm(Ytrain ~ Xtrain$Gender + 
+               Xtrain$Customer_Age +
+               Xtrain$Dependent_count + 
+               Xtrain$Education_Level + 
+               Xtrain$Dependent_count + 
+               Xtrain$Marital_Status + 
+               Xtrain$Income_Category + 
+               Xtrain$Card_Category + 
+               Xtrain$Months_on_book + 
+               Xtrain$Total_Relationship_Count + 
+               Xtrain$Months_Inactive_12_mon + 
+               Xtrain$Contacts_Count_12_mon + 
+               Xtrain$Credit_Limit + 
+               Xtrain$Total_Revolving_Bal + 
+              # Xtrain$Avg_Open_To_Buy + 
+               Xtrain$Total_Amt_Chng_Q4_Q1 + 
+               Xtrain$Total_Trans_Amt + 
+               Xtrain$Total_Trans_Ct + 
+               Xtrain$Total_Ct_Chng_Q4_Q1 + 
+               Xtrain$Avg_Utilization_Ratio
+             , family = 'binomial')
+summary(glmOut)
+```
+
+
+
+## LDA - Linear Discriminant Analysis
+```{r}
+trControl = trainControl(method = 'none')
+outLDA    = train(x = XtrainFull, y = Ytrain, 
+                  method = 'lda', trControl = trControl)
+```
+
+
+```{r}
+YhatTestProb_LDA = predict(outLDA, XtestFull, type = 'prob')
+head(YhatTestProb_LDA)
+```
+
+
+```{r}
+calibProbs = calibration(Ytest ~ YhatTestProb_LDA$"1", cuts = 5)
+xyplot(calibProbs)
+```
+
+
+```{r}
+YhatTestLDA = predict(outLDA, XtestFull, type = 'raw')
+
+LDAconfusionMatrixOut = confusionMatrix(reference = Ytest, data = YhatTestLDA)
+
+print(LDAconfusionMatrixOut$table)
+
+print(LDAconfusionMatrixOut$overall[1:2])
+
+print(LDAconfusionMatrixOut$byClass[1:2])
+
+LDA_accuracy = LDAconfusionMatrixOut$overall[1]
+
+LDA_accuracy
+```
+
+```{r}
+LDA_AUC = rocCurve$auc
+LDA_AUC
+```
+Logistic regression has higher accuracy than LDA but they have the same AUC values.
+
